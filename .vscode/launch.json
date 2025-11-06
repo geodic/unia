@@ -1,0 +1,110 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug unit tests in library 'unai'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'gemini_simple'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=gemini_simple"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'gemini_simple'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=gemini_simple"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'gemini_streaming'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=gemini_streaming"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'gemini_streaming'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=gemini_streaming"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'openai_simple'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=openai_simple"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'openai_simple'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=openai_simple"
+                ]
+            }
+        },
+        {
+            "name": "Debug example 'openai_streaming'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--example=openai_streaming"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Debug unit tests in example 'openai_streaming'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--example=openai_streaming"
+                ]
+            }
+        }
+    ]
+}
