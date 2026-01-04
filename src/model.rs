@@ -13,6 +13,15 @@ pub enum Role {
     Assistant,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaType {
+    Image,
+    Document,
+    Text,
+    Binary,
+}
+
 /// A part of a message content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -45,7 +54,8 @@ pub enum Part {
         #[serde(default)]
         finished: bool,
     },
-    Image {
+    Media {
+        media_type: MediaType,
         data: String,
         mime_type: String,
         #[serde(default)]
@@ -53,14 +63,18 @@ pub enum Part {
         #[serde(default)]
         finished: bool,
     },
-    File {
-        data: String,
-        mime_type: String,
-        #[serde(default)]
-        uri: Option<String>,
-        #[serde(default)]
-        finished: bool,
-    },
+}
+
+impl Part {
+    pub fn anchor_media(&self) -> String {
+        match self {
+            Part::Media { mime_type, uri, .. } => {
+                let uri_str = uri.as_deref().unwrap_or("unknown");
+                format!("File ({}) at {}:", mime_type, uri_str)
+            }
+            _ => panic!("anchor_media called on non-Media part"),
+        }
+    }
 }
 
 /// A single message in a conversation.

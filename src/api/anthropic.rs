@@ -12,7 +12,7 @@ use std::pin::Pin;
 
 use crate::client::{Client, ClientError, StreamingClient};
 use crate::http::{add_extra_headers, build_http_client, RequestBuilderExt, ResponseExt};
-use crate::model::{FinishReason, Message, Part, Response, Usage};
+use crate::model::{FinishReason, Message, Part, Response, Usage, MediaType};
 use crate::options::{ModelOptions, TransportOptions};
 use crate::sse::SSEResponseExt;
 
@@ -281,8 +281,7 @@ impl AnthropicStream {
                                     }
                                 },
                                 Part::FunctionResponse { finished, .. } => *finished = true,
-                                Part::Image { finished, .. } => *finished = true,
-                                Part::File { finished, .. } => *finished = true,
+                                Part::Media { finished, .. } => *finished = true,
                             }
                         }
                         yield current_response.clone();
@@ -458,132 +457,131 @@ impl AnthropicRequest {
         let mut messages = Vec::new();
         
         for msg in messages_in {
-            match msg {
-                Message::User(parts) => {
-                    let mut content_blocks = Vec::new();
-                    for part in parts {
-                        match part {
-                            Part::Text { content: t, .. } => content_blocks.push(AnthropicContentBlock::Text { 
-                                text: t,
-                                cache_control: None,
-                            }),
-                            Part::Image { data, mime_type, .. } => {
+            let role = match msg {
+                Message::User(_) => "user",
+                Message::Assistant(_) => "assistant",
+            };
+
+            let mut content_blocks = Vec::new();
+            for part in msg.parts() {
+                match part {
+                    Part::Text { content: t, .. } => content_blocks.push(AnthropicContentBlock::Text { 
+                        text: t.clone(),
+                        cache_control: None,
+                    }),
+                    Part::Media { media_type, data, mime_type, .. } => {
+                        content_blocks.push(AnthropicContentBlock::Text {
+                            text: part.anchor_media(),
+                            cache_control: None,
+                        });
+
+                        match media_type {
+                            MediaType::Image => {
                                 content_blocks.push(AnthropicContentBlock::Image {
                                     source: AnthropicImageSource {
                                         source_type: "base64".to_string(),
-                                        media_type: mime_type,
-                                        data,
+                                        media_type: mime_type.clone(),
+                                        data: data.clone(),
                                     },
                                     cache_control: None,
                                 });
+                            },
+                            MediaType::Document => {
+                                content_blocks.push(AnthropicContentBlock::Document {
+                                    source: AnthropicDocumentSource {
+                                        source_type: "base64".to_string(),
+                                        media_type: mime_type.clone(),
+                                        data: data.clone(),
+                                    },
+                                    cache_control: None,
+                                });
+                            },
+                            MediaType::Text | MediaType::Binary => {
+                                let content = match BASE64_STANDARD.decode(data) {
+                                    Ok(bytes) => String::from_utf8(bytes).unwrap_or(data.clone()),
+                                    Err(_) => data.clone(),
+                                };
+                                content_blocks.push(AnthropicContentBlock::Text {
+                                    text: content,
+                                    cache_control: None,
+                                });
                             }
-                            Part::File { data, mime_type, .. } => {
-                                if mime_type == "application/pdf" {
-                                    content_blocks.push(AnthropicContentBlock::Document {
-                                        source: AnthropicDocumentSource {
-                                            source_type: "base64".to_string(),
-                                            media_type: mime_type,
-                                            data,
-                                        },
-                                        cache_control: None,
-                                    });
-                                } else {
-                                    let text = match BASE64_STANDARD.decode(&data) {
-                                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                                        Err(_) => format!("File ({}): {}", mime_type, data),
-                                    };
-                                    content_blocks.push(AnthropicContentBlock::Text {
-                                        text,
-                                        cache_control: None,
-                                    });
-                                }
+                        }
+                    }
+                    Part::FunctionCall { id, name, arguments, .. } => {
+                        if let Some(call_id) = id {
+                            content_blocks.push(AnthropicContentBlock::ToolUse {
+                                id: call_id.clone(),
+                                name: name.clone(),
+                                input: arguments.clone(),
+                                cache_control: None,
+                            });
+                        }
+                    }
+                    Part::FunctionResponse { id, response, parts, .. } => {
+                        if let Some(call_id) = id {
+                            let mut blocks = Vec::new();
+                            
+                            if response.clone() != json!({}) {
+                                blocks.push(AnthropicToolResultBlock::Text {
+                                    text: serde_json::to_string(&response).unwrap_or_default(),
+                                });
                             }
-                            Part::FunctionResponse { id, response, parts, .. } => {
-                                if let Some(call_id) = id {
-                                    let mut blocks = Vec::new();
-                                    
-                                    if response.clone() != json!({}) {
-                                        blocks.push(AnthropicToolResultBlock::Text {
-                                            text: serde_json::to_string(&response).unwrap_or_default(),
-                                        });
-                                    }
 
-                                    for part in parts {
-                                        match part {
-                                            Part::Image { data, mime_type, .. } => {
+                            for part in parts {
+                                match part {
+                                    Part::Media { media_type, data, mime_type, .. } => {
+                                        blocks.push(AnthropicToolResultBlock::Text {
+                                            text: part.anchor_media(),
+                                        });
+
+                                        match media_type {
+                                            MediaType::Image => {
                                                 blocks.push(AnthropicToolResultBlock::Image {
                                                     source: AnthropicImageSource {
                                                         source_type: "base64".to_string(),
-                                                        media_type: mime_type,
-                                                        data,
+                                                        media_type: mime_type.clone(),
+                                                        data: data.clone(),
                                                     },
                                                 });
-                                            }
-                                            Part::File { data, mime_type, .. } => {
-                                                let text = match BASE64_STANDARD.decode(&data) {
-                                                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                                                    Err(_) => format!("File ({}): {}", mime_type, data),
+                                            },
+                                            _ => {
+                                                let content = match BASE64_STANDARD.decode(data) {
+                                                    Ok(bytes) => String::from_utf8(bytes).unwrap_or(data.clone()),
+                                                    Err(_) => data.clone(),
                                                 };
                                                 blocks.push(AnthropicToolResultBlock::Text {
-                                                    text,
+                                                    text: content,
                                                 });
                                             }
-                                            _ => {}
                                         }
                                     }
+                                    _ => {}
+                                }
+                            }
 
-                                    content_blocks.push(AnthropicContentBlock::ToolResult {
-                                        tool_use_id: call_id.clone(),
-                                        content: AnthropicToolResultContent::Blocks(blocks),
-                                        is_error: None,
-                                        cache_control: None,
-                                    });
-                                }
-                            }
-                            _ => {} 
-                        }
-                    }
-                    if !content_blocks.is_empty() {
-                        messages.push(AnthropicMessage {
-                            role: "user".to_string(),
-                            content: content_blocks,
-                        });
-                    }
-                }
-                Message::Assistant(parts) => {
-                    let mut content_blocks = Vec::new();
-                    for part in parts {
-                        match part {
-                            Part::Text { content: t, .. } => content_blocks.push(AnthropicContentBlock::Text { 
-                                text: t,
+                            content_blocks.push(AnthropicContentBlock::ToolResult {
+                                tool_use_id: call_id.clone(),
+                                content: AnthropicToolResultContent::Blocks(blocks),
+                                is_error: None,
                                 cache_control: None,
-                            }),
-                            Part::FunctionCall { id, name, arguments, .. } => {
-                                if let Some(call_id) = id {
-                                    content_blocks.push(AnthropicContentBlock::ToolUse {
-                                        id: call_id.clone(),
-                                        name: name.clone(),
-                                        input: arguments.clone(),
-                                        cache_control: None,
-                                    });
-                                }
-                            }
-                            Part::Reasoning { content, signature, .. } => {
-                                content_blocks.push(AnthropicContentBlock::Thinking {
-                                    thinking: content,
-                                    signature: signature.unwrap_or_default(),
-                                });
-                            }
-                            _ => {} 
+                            });
                         }
                     }
-                    if !content_blocks.is_empty() {
-                        messages.push(AnthropicMessage {
-                            role: "assistant".to_string(),
-                            content: content_blocks,
+                    Part::Reasoning { content, signature, .. } => {
+                        content_blocks.push(AnthropicContentBlock::Thinking {
+                            thinking: content.clone(),
+                            signature: signature.clone().unwrap_or_default(),
                         });
                     }
                 }
+            }
+            
+            if !content_blocks.is_empty() {
+                messages.push(AnthropicMessage {
+                    role: role.to_string(),
+                    content: content_blocks,
+                });
             }
         }
 

@@ -11,7 +11,7 @@ use std::pin::Pin;
 
 use crate::client::{Client, ClientError, StreamingClient};
 use crate::http::{add_extra_headers, build_http_client, RequestBuilderExt, ResponseExt};
-use crate::model::{FinishReason, Message, Part, Response, Usage};
+use crate::model::{FinishReason, Message, Part, Response, Usage, MediaType};
 use crate::options::{ModelOptions, TransportOptions};
 use crate::sse::SSEResponseExt;
 use rmcp::model::CallToolResult;
@@ -77,69 +77,8 @@ impl GeminiClient {
         }
     }
 
-    pub async fn upload_file(&self, mime_type: &str, data: &[u8]) -> Result<String, ClientError> {
-        tracing::debug!("Starting file upload. Mime: {}, Size: {} bytes", mime_type, data.len());
-        let http_client = build_http_client(&self.transport_options)?;
-        let upload_base_url = "https://generativelanguage.googleapis.com/upload/v1beta/files";
-        let start_url = format!("{}?key={}", upload_base_url, self.api_key);
-        
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Goog-Upload-Protocol", HeaderValue::from_static("resumable"));
-        headers.insert("X-Goog-Upload-Command", HeaderValue::from_static("start"));
-        headers.insert("X-Goog-Upload-Header-Content-Length", HeaderValue::from_str(&data.len().to_string()).unwrap());
-        headers.insert("X-Goog-Upload-Header-Content-Type", HeaderValue::from_str(mime_type).map_err(|_| ClientError::Config("Invalid mime type".to_string()))?);
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        let body = json!({});
-
-        let resp = http_client.post(&start_url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await?;
-        let status = resp.status();
-
-        if !status.is_success() {
-             let body = resp.text().await.unwrap_or_default();
-             return Err(Self::handle_error_response(status, &body));
-        }
-
-        let upload_url = resp.headers().get("x-goog-upload-url")
-            .ok_or_else(|| ClientError::ProviderError("Missing x-goog-upload-url header".to_string()))?
-            .to_str()
-            .map_err(|_| ClientError::ProviderError("Invalid x-goog-upload-url header".to_string()))?
-            .to_string();
-
-        tracing::debug!("File upload started. Upload URL: {}", upload_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert("Content-Length", HeaderValue::from_str(&data.len().to_string()).unwrap());
-        headers.insert("X-Goog-Upload-Offset", HeaderValue::from_static("0"));
-        headers.insert("X-Goog-Upload-Command", HeaderValue::from_static("upload, finalize"));
-
-        let resp = http_client.post(&upload_url)
-            .headers(headers)
-            .body(data.to_vec())
-            .send()
-            .await?;
-        let status = resp.status();
-
-        if !status.is_success() {
-             let body = resp.text().await.unwrap_or_default();
-             return Err(Self::handle_error_response(status, &body));
-        }
-
-        let resp_json: Value = resp.json().await?;
-        let file_uri = resp_json["file"]["uri"].as_str()
-            .ok_or_else(|| ClientError::ProviderError("Missing file uri in response".to_string()))?
-            .to_string();
-
-        tracing::debug!("File uploaded successfully. URI: {}", file_uri);
-
-        Ok(file_uri)
-    }
-
-    async fn build_request(
+    fn build_request(
         &self,
         messages: Vec<Message>,
         tools: Vec<rmcp::model::Tool>,
@@ -154,7 +93,7 @@ impl GeminiClient {
         let method = if stream { "streamGenerateContent?alt=sse&" } else { "generateContent?" };
         let url = format!("{}/models/{}:{}key={}", self.base_url, model, method, self.api_key);
 
-        let request_body = GeminiRequest::new(self, messages, &self.model_options, tools).await?;
+        let request_body = GeminiRequest::new(messages, &self.model_options, tools)?;
 
         let http_client = build_http_client(&self.transport_options)?;
 
@@ -177,7 +116,7 @@ impl Client for GeminiClient {
         messages: Vec<Message>,
         tools: Vec<rmcp::model::Tool>,
     ) -> Result<Response, ClientError> {
-        let req = self.build_request(messages, tools, false).await?;
+        let req = self.build_request(messages, tools, false)?;
         
         let response = req.send().await?;
         let status = response.status();
@@ -210,7 +149,7 @@ impl StreamingClient for GeminiClient {
         Pin<Box<dyn Stream<Item = Result<Response, ClientError>> + Send>>,
         ClientError,
     > {
-        let req = self.build_request(messages, tools, true).await?;
+        let req = self.build_request(messages, tools, true)?;
         let response = req.send().await?;
         let status = response.status();
 
@@ -347,8 +286,7 @@ impl GeminiStream {
                                     Part::Reasoning { finished, .. } => *finished = true,
                                     Part::FunctionCall { finished, .. } => *finished = true,
                                     Part::FunctionResponse { finished, .. } => *finished = true,
-                                    Part::Image { finished, .. } => *finished = true,
-                                    Part::File { finished, .. } => *finished = true,
+                                    Part::Media { finished, .. } => *finished = true,
                                 }
                             }
 
@@ -405,10 +343,6 @@ enum GeminiPart {
     },
     FunctionResponse { function_response: GeminiFunctionResponse },
     InlineData { inline_data: GeminiInlineData },
-    FileData { 
-        #[serde(rename = "fileData")]
-        file_data: GeminiFileData,
-    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -436,14 +370,6 @@ struct GeminiFunctionResponseBlob {
     #[serde(rename = "mimeType")]
     mime_type: String,
     data: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct GeminiFileData {
-    #[serde(rename = "mimeType")]
-    mime_type: Option<String>,
-    #[serde(rename = "fileUri")]
-    file_uri: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -489,8 +415,7 @@ struct GeminiThinkingConfig {
 }
 
 impl GeminiRequest {
-    async fn new(
-        client: &GeminiClient,
+    fn new(
         messages_in: Vec<Message>,
         model_options: &ModelOptions<GeminiModel>,
         tool_defs: Vec<rmcp::model::Tool>,
@@ -508,23 +433,14 @@ impl GeminiRequest {
                 match part {
                     Part::Text { content: t, .. } => parts.push(GeminiPart::Text { text: t.clone(), thought: None }),
                     Part::Reasoning { content, .. } => parts.push(GeminiPart::Text { text: content.clone(), thought: Some(true) }),
-                    Part::Image { data, mime_type, .. } => {
+                    Part::Media { data, mime_type, .. } => {
+                        let anchor_text = part.anchor_media();
+                        parts.push(GeminiPart::Text { text: anchor_text, thought: None });
+
                         parts.push(GeminiPart::InlineData {
                             inline_data: GeminiInlineData {
                                 mime_type: mime_type.clone(),
                                 data: data.clone(),
-                            },
-                        });
-                    }
-                    Part::File { data, mime_type, .. } => {
-                        let bytes = BASE64_STANDARD.decode(&data)
-                            .map_err(|_| ClientError::Config("Invalid base64 in file part".to_string()))?;
-                        let file_uri = client.upload_file(&mime_type, &bytes).await?;
-
-                        parts.push(GeminiPart::FileData {
-                            file_data: GeminiFileData {
-                                mime_type: Some(mime_type.clone()),
-                                file_uri,
                             },
                         });
                     }
@@ -542,7 +458,7 @@ impl GeminiRequest {
                         
                         for part in inner_parts {
                             match part {
-                                Part::Image { data, mime_type, .. } | Part::File { data, mime_type, .. } => {
+                                Part::Media { data, mime_type, .. } => {
                                     parts_vec.push(GeminiFunctionResponsePart {
                                         inline_data: GeminiFunctionResponseBlob {
                                             mime_type: mime_type.clone(),
@@ -692,7 +608,8 @@ impl From<GeminiResponse> for Response {
                                 let mut inner_parts = Vec::new();
                                 if let Some(gemini_parts) = function_response.parts {
                                     for p in gemini_parts {
-                                        inner_parts.push(Part::File {
+                                        inner_parts.push(Part::Media {
+                                            media_type: MediaType::Binary, // Default to binary for response parts
                                             data: p.inline_data.data,
                                             mime_type: p.inline_data.mime_type,
                                             uri: None,

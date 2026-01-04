@@ -11,7 +11,7 @@ use std::pin::Pin;
 
 use crate::client::{Client, ClientError, StreamingClient};
 use crate::http::{add_extra_headers, build_http_client, RequestBuilderExt, ResponseExt};
-use crate::model::{FinishReason, Message, Part, Response, Usage};
+use crate::model::{FinishReason, Message, Part, Response, Usage, MediaType};
 use crate::options::{ModelOptions, TransportOptions};
 use crate::sse::SSEResponseExt;
 
@@ -162,17 +162,12 @@ impl OpenAiStream {
             
             let mut tool_index_map: HashMap<u32, usize> = HashMap::new();
             let mut current_text_part_index: Option<usize> = None;
-            let mut current_reasoning_part_index: Option<usize> = None;
 
             while let Some(event_result) = stream.next().await {
                 let event_str = event_result?;
 
-                if event_str == "[DONE]" {
-                    break;
-                }
-
                 let chunk_result: OpenAiStreamChunk = serde_json::from_str(&event_str)
-                    .map_err(|e| ClientError::ProviderError(format!("JSON parse error: {}", e)))?;
+                    .map_err(|e| ClientError::ProviderError(format!("JSON parse error: {} | Input: {}", e, event_str)))?;
 
                 if let Some(usage) = chunk_result.usage {
                     current_response.usage.prompt_tokens = Some(usage.prompt_tokens);
@@ -191,22 +186,6 @@ impl OpenAiStream {
                             } else {
                                 parts.push(Part::Text { content: delta_content, finished: false });
                                 current_text_part_index = Some(parts.len() - 1);
-                            }
-                        }
-
-                        if let Some(reasoning) = delta.reasoning_content {
-                             if let Some(idx) = current_reasoning_part_index {
-                                if let Some(Part::Reasoning { content, .. }) = parts.get_mut(idx) {
-                                    content.push_str(&reasoning);
-                                }
-                            } else {
-                                parts.push(Part::Reasoning {
-                                    content: reasoning,
-                                    summary: None,
-                                    signature: None,
-                                    finished: false,
-                                });
-                                current_reasoning_part_index = Some(parts.len() - 1);
                             }
                         }
 
@@ -258,8 +237,7 @@ impl OpenAiStream {
                                     }
                                 },
                                 Part::FunctionResponse { finished, .. } => *finished = true,
-                                Part::Image { finished, .. } => *finished = true,
-                                Part::File { finished, .. } => *finished = true,
+                                Part::Media { finished, .. } => *finished = true,
                             }
                         }
 
@@ -403,21 +381,28 @@ impl<M: OpenAiCompatibleModel> OpenAiRequest<M> {
             for part in msg.parts() {
                 match part {
                     Part::Text { content: t, .. } => content_parts.push(OpenAiContentPart::Text { text: t.clone() }),
-                    Part::Image { data, mime_type, .. } => {
-                        content_parts.push(OpenAiContentPart::ImageUrl {
-                            image_url: OpenAiImageUrl {
-                                url: format!("data:{};base64,{}", mime_type, data),
+                    Part::Media { media_type, data, mime_type, uri, .. } => {
+                        let anchor_text = part.anchor_media();
+                        content_parts.push(OpenAiContentPart::Text { text: anchor_text });
+
+                        match media_type {
+                            MediaType::Image => {
+                                content_parts.push(OpenAiContentPart::ImageUrl {
+                                    image_url: OpenAiImageUrl {
+                                        url: format!("data:{};base64,{}", mime_type, data),
+                                    },
+                                });
                             },
-                        });
-                    }
-                    Part::File { data, mime_type, uri, .. } => {
-                        content_parts.push(OpenAiContentPart::File {
-                            file: OpenAiFileContent {
-                                file_data: Some(data.clone()),
-                                file_id: None,
-                                filename: uri.clone(),
+                            _ => {
+                                content_parts.push(OpenAiContentPart::File {
+                                    file: OpenAiFileContent {
+                                        file_data: Some(data.clone()),
+                                        file_id: None,
+                                        filename: uri.clone(),
+                                    }
+                                });
                             }
-                        });
+                        }
                     }
                     Part::FunctionCall { id, name: fn_name, arguments, .. } => {
                         if let Some(call_id) = id {
@@ -443,8 +428,15 @@ impl<M: OpenAiCompatibleModel> OpenAiRequest<M> {
 
                             for part in parts {
                                 match part {
-                                    Part::Image { .. } => content_str.push_str("\n[Image Content]"),
-                                    Part::File { mime_type, .. } => content_str.push_str(&format!("\n[File: {}]", mime_type)),
+                                    Part::Media { media_type, mime_type, .. } => {
+                                        let anchor_text = part.anchor_media();
+                                        content_str.push_str(&format!("\n{}", anchor_text));
+
+                                        match media_type {
+                                            MediaType::Image => content_str.push_str("\n[Image Content]"),
+                                            _ => content_str.push_str(&format!("\n[File: {}]", mime_type)),
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -619,7 +611,6 @@ struct OpenAiStreamChoice {
 struct OpenAiDelta {
     content: Option<String>,
     tool_calls: Option<Vec<OpenAiStreamToolCall>>,
-    reasoning_content: Option<String>, // For DeepSeek/others compatible
 }
 
 #[derive(Debug, Deserialize)]

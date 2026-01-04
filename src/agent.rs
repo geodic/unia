@@ -94,8 +94,10 @@ impl<C: Client> Agent<C> {
             match server.list_tools().await {
                 Ok(tools) => tools.into_iter().map(|t| t.value).collect(),
                 Err(e) => {
-                    warn!("Failed to list tools from MCP server: {}", e);
-                    Vec::new()
+                    return Err(ClientError::ProviderError(format!(
+                        "Failed to list tools from MCP server: {}",
+                        e
+                    )));
                 }
             }
         } else {

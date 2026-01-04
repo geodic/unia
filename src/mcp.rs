@@ -1,4 +1,4 @@
-use crate::model::{Part, Message, Role};
+use crate::model::{Part, Message, Role, MediaType};
 use async_trait::async_trait;
 use rmcp::model::{
     AnnotateAble, Annotated, CallToolRequestParam, CallToolResult, GetPromptRequestParam, GetPromptResult, Prompt,
@@ -145,7 +145,8 @@ where
                     }
                 }
                 RawContent::Image(image_content) => {
-                    parts.push(Part::Image {
+                    parts.push(Part::Media {
+                        media_type: MediaType::Image,
                         data: image_content.data,
                         mime_type: image_content.mime_type,
                         uri: None,
@@ -258,7 +259,8 @@ where
 
             let part = match msg.content {
                 PromptMessageContent::Text { text } => Part::Text { content: text, finished: true },
-                PromptMessageContent::Image { image } => Part::Image { 
+                PromptMessageContent::Image { image } => Part::Media { 
+                    media_type: MediaType::Image,
                     data: image.data.clone(), 
                     mime_type: image.mime_type.clone(), 
                     uri: None,
@@ -419,7 +421,8 @@ impl AttachResources for Vec<Message> {
 fn resource_to_part(resource: ResourceContents) -> Part {
     match resource {
         ResourceContents::TextResourceContents { text, mime_type, uri, .. } => {
-             Part::File {
+             Part::Media {
+                media_type: MediaType::Text,
                 data: text,
                 mime_type: mime_type.unwrap_or_else(|| "text/plain".to_string()),
                 uri: Some(uri),
@@ -428,20 +431,20 @@ fn resource_to_part(resource: ResourceContents) -> Part {
         }
         ResourceContents::BlobResourceContents { blob, mime_type, uri, .. } => {
             let mime = mime_type.unwrap_or_else(|| "application/octet-stream".to_string());
-            if mime.starts_with("image/") {
-                Part::Image {
-                    data: blob,
-                    mime_type: mime,
-                    uri: Some(uri),
-                    finished: true,
-                }
+            let media_type = if mime.starts_with("image/") {
+                MediaType::Image
+            } else if mime == "application/pdf" {
+                MediaType::Document
             } else {
-                Part::File {
-                    data: blob,
-                    mime_type: mime,
-                    uri: Some(uri),
-                    finished: true,
-                }
+                MediaType::Binary
+            };
+
+            Part::Media {
+                media_type,
+                data: blob,
+                mime_type: mime,
+                uri: Some(uri),
+                finished: true,
             }
         }
     }
